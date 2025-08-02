@@ -1,8 +1,8 @@
 import os
-from transformers import pipeline
+from transformers import pipeline, AutoTokenizer
 
-# Supported file extensions
 FILE_EXTS = {".py", ".sql", ".yml", ".yaml", ".xml", ".conf", ".ini", ".txt"}
+MODEL_NAME = "sshleifer/distilbart-cnn-12-6"
 
 def read_file(path):
     try:
@@ -20,45 +20,85 @@ def get_files_in_directory(directory):
                 file_paths.append(os.path.join(root, file))
     return file_paths
 
-def chunk_text(text, max_tokens=500):
-    # Simple chunking for long files
-    lines = text.splitlines()
+def chunk_text(text, tokenizer, max_tokens=1020):
+    """Chunk text by actual token count to ensure it fits within model limits"""
+    tokens = tokenizer.encode(text, add_special_tokens=False)
     chunks = []
-    chunk = []
-    token_count = 0
-    for line in lines:
-        token_count += len(line.split())
-        if token_count > max_tokens:
-            chunks.append("\n".join(chunk))
-            chunk = []
-            token_count = 0
-        chunk.append(line)
-    if chunk:
-        chunks.append("\n".join(chunk))
+    start = 0
+    while start < len(tokens):
+        end = min(start + max_tokens, len(tokens))
+        chunk_tokens = tokens[start:end]
+        chunk_text = tokenizer.decode(chunk_tokens, skip_special_tokens=True)
+        chunks.append(chunk_text)
+        start = end
     return chunks
 
-def summarize_file(file_path, summarizer):
-    content = read_file(file_path)
+def summarize_content(content, summarizer, tokenizer):
     if not content.strip():
         return "File is empty or unreadable."
-    # Chunk if too long
-    chunks = chunk_text(content, max_tokens=500)
+    
+    # Chunk the content to ensure each piece fits within model limits
+    chunks = chunk_text(content, tokenizer)
     summaries = []
+    
     for chunk in chunks:
-        result = summarizer(chunk, max_length=60, min_length=15, do_sample=False)
-        summaries.append(result[0]['summary_text'])
-        if len(summaries) >= 2:  # Limit to 2 summaries per file
-            break
+        try:
+            result = summarizer(chunk)
+            summaries.append(result[0]['summary_text'])
+            if len(summaries) >= 3:  # Limit to 2-3 summaries per file
+                break
+        except Exception as e:
+            print(f"Error summarizing chunk: {e}")
+            continue
+    
+    if not summaries:
+        return "Could not generate summary for this file."
+    
     return " ".join(summaries)
 
+def summarize_file(file_path, summarizer, tokenizer):
+    content = read_file(file_path)
+    return summarize_content(content, summarizer, tokenizer)
+
 def summarize_files(directory):
-    summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6", device=-1)
+    try:
+        summarizer = pipeline("summarization", model=MODEL_NAME, device=-1)
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    except Exception as e:
+        return f"Error loading model: {e}"
+    
     files = get_files_in_directory(directory)
     summary_lines = []
+    
     for file_path in files:
         file_name = os.path.relpath(file_path, directory)
-        summary = summarize_file(file_path, summarizer)
+        summary = summarize_file(file_path, summarizer, tokenizer)
         summary_lines.append(f"**{file_name}**: {summary}")
+    
     if not summary_lines:
         return "No supported files found in the directory."
+    return "\n\n".join(summary_lines)
+
+def summarize_uploaded_files(uploaded_files):
+    try:
+        summarizer = pipeline("summarization", model=MODEL_NAME, device=-1)
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    except Exception as e:
+        return f"Error loading model: {e}"
+    
+    summary_lines = []
+    
+    for file in uploaded_files:
+        try:
+            content = file.read().decode("utf-8", errors="ignore")
+            file.seek(0)  # Reset file pointer for potential re-reading
+        except Exception as e:
+            summary_lines.append(f"**{file.name}**: Error reading file: {e}")
+            continue
+        
+        summary = summarize_content(content, summarizer, tokenizer)
+        summary_lines.append(f"**{file.name}**: {summary}")
+    
+    if not summary_lines:
+        return "No uploaded files to summarize."
     return "\n\n".join(summary_lines)
