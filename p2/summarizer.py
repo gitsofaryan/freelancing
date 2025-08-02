@@ -27,6 +27,7 @@ def get_files_in_directory(directory):
     return file_paths, file_counts
 
 def chunk_text(text, tokenizer, max_tokens=1020):
+    """Chunk text by actual token count to ensure it fits within model limits"""
     tokens = tokenizer.encode(text, add_special_tokens=False)
     chunks = []
     start = 0
@@ -42,6 +43,7 @@ def summarize_content(content, summarizer, tokenizer):
     if not content.strip():
         return "File is empty or unreadable."
     
+    # Chunk the content to ensure each piece fits within model limits
     chunks = chunk_text(content, tokenizer)
     summaries = []
     
@@ -49,9 +51,10 @@ def summarize_content(content, summarizer, tokenizer):
         try:
             result = summarizer(chunk)
             summaries.append(result[0]['summary_text'])
-            if len(summaries) >= 2:  # Keep it concise
+            if len(summaries) >= 2:  # Limit to 2 summaries per file for conciseness
                 break
         except Exception as e:
+            print(f"Error summarizing chunk: {e}")
             continue
     
     if not summaries:
@@ -60,7 +63,7 @@ def summarize_content(content, summarizer, tokenizer):
     return " ".join(summaries)
 
 def create_consolidated_summary(file_counts, individual_summaries):
-    # Create overview
+    """Create overview with file counts"""
     overview_parts = []
     for ext, count in file_counts.items():
         if ext == ".py":
@@ -69,13 +72,22 @@ def create_consolidated_summary(file_counts, individual_summaries):
             overview_parts.append(f"{count} YAML files")
         elif ext == ".sql":
             overview_parts.append(f"{count} SQL files")
+        elif ext == ".xml":
+            overview_parts.append(f"{count} XML files")
+        elif ext in [".conf", ".ini"]:
+            overview_parts.append(f"{count} configuration files")
         else:
             overview_parts.append(f"{count} {ext[1:].upper()} files")
     
-    overview = f"This directory contains {', '.join(overview_parts)}."
-    
-    # Combine with individual summaries
-    return f"{overview}\n\n{individual_summaries}"
+    if overview_parts:
+        overview = f"This directory contains {', '.join(overview_parts)}."
+        return f"{overview}\n\n{individual_summaries}"
+    else:
+        return individual_summaries
+
+def summarize_file(file_path, summarizer, tokenizer):
+    content = read_file(file_path)
+    return summarize_content(content, summarizer, tokenizer)
 
 def summarize_files(directory):
     try:
@@ -89,7 +101,7 @@ def summarize_files(directory):
     
     for file_path in files:
         file_name = os.path.relpath(file_path, directory)
-        summary = summarize_content(read_file(file_path), summarizer, tokenizer)
+        summary = summarize_file(file_path, summarizer, tokenizer)
         
         # Add context based on file type
         ext = os.path.splitext(file_name)[-1].lower()
@@ -99,11 +111,55 @@ def summarize_files(directory):
             summary_lines.append(f"**{file_name}** (Python): {summary}")
         elif ext in [".yml", ".yaml"]:
             summary_lines.append(f"**{file_name}** (YAML): {summary}")
+        elif ext == ".xml":
+            summary_lines.append(f"**{file_name}** (XML): {summary}")
         else:
             summary_lines.append(f"**{file_name}**: {summary}")
     
     if not summary_lines:
         return "No supported files found in the directory."
+    
+    individual_summaries = "\n\n".join(summary_lines)
+    return create_consolidated_summary(file_counts, individual_summaries)
+
+def summarize_uploaded_files(uploaded_files):
+    try:
+        summarizer = pipeline("summarization", model=MODEL_NAME, device=-1)
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    except Exception as e:
+        return f"Error loading model: {e}"
+    
+    summary_lines = []
+    file_counts = defaultdict(int)
+    
+    for file in uploaded_files:
+        try:
+            content = file.read().decode("utf-8", errors="ignore")
+            file.seek(0)  # Reset file pointer for potential re-reading
+        except Exception as e:
+            summary_lines.append(f"**{file.name}**: Error reading file: {e}")
+            continue
+        
+        # Count file types
+        ext = os.path.splitext(file.name)[-1].lower()
+        file_counts[ext] += 1
+        
+        summary = summarize_content(content, summarizer, tokenizer)
+        
+        # Add context based on file type
+        if ext == ".sql":
+            summary_lines.append(f"**{file.name}** (SQL): {summary}")
+        elif ext == ".py":
+            summary_lines.append(f"**{file.name}** (Python): {summary}")
+        elif ext in [".yml", ".yaml"]:
+            summary_lines.append(f"**{file.name}** (YAML): {summary}")
+        elif ext == ".xml":
+            summary_lines.append(f"**{file.name}** (XML): {summary}")
+        else:
+            summary_lines.append(f"**{file.name}**: {summary}")
+    
+    if not summary_lines:
+        return "No uploaded files to summarize."
     
     individual_summaries = "\n\n".join(summary_lines)
     return create_consolidated_summary(file_counts, individual_summaries)
